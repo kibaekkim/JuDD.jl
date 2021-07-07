@@ -25,8 +25,11 @@ mutable struct BundleMaster <: AbstractLagrangeMaster
     end
 end
 
-function load!(method::BundleMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64})
+function load!(method::BundleMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64}, bound::Union{Float64,Nothing})
     method.inner = method.constructor(num_coupling_variables, num_blocks, eval_function; init = init_sol, params = method.params)
+    if !isnothing(bound)
+        BM.set_obj_limit(method.inner, bound)
+    end
 
     # Set optimizer to bundle method
     model = BM.get_jump_model(method.inner)

@@ -10,6 +10,7 @@ mutable struct SubgradientMaster <: AbstractLagrangeMaster
 
     iter::Int # current iteration count
     maxiter::Int
+    obj_limit::Float64
 
     f::Float64
     best_f::Float64
@@ -31,6 +32,7 @@ mutable struct SubgradientMaster <: AbstractLagrangeMaster
         sg.eval_f = nothing
         sg.iter = 0
         sg.maxiter = 1000
+        sg.obj_limit = -Inf
         sg.f = -Inf
         sg.best_f = -Inf
         sg.x = []
@@ -45,12 +47,16 @@ mutable struct SubgradientMaster <: AbstractLagrangeMaster
     end
 end
 
-function load!(method::SubgradientMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64})
+function load!(method::SubgradientMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64}, bound::Union{Float64,Nothing})
     method.num_vars = num_coupling_variables
     method.num_functions = num_blocks
     method.eval_f = eval_function
     method.x = init_sol
     method.best_x = init_sol
+    if !isnothing(bound)
+        method.obj_limit = bound
+        #TODO: implement termination function
+    end
 end
 
 function add_constraints!(LD::AbstractLagrangeDual, method::SubgradientMaster)

@@ -17,7 +17,7 @@ This function loads the Lagrangian dual problem to the master.
 - `eval_function`: function pointer to evalute Lagrangian dual functions
 - `init_sol`: initial solution of the Lagrangian master
 """
-function load!(method::AbstractLagrangeMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64}) end
+function load!(method::AbstractLagrangeMaster, num_coupling_variables::Int, num_blocks::Int, eval_function::Function, init_sol::Vector{Float64}, bound::Union{Float64,Nothing}) end
 
 """
     add_constraints!
