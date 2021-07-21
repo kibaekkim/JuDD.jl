@@ -12,6 +12,7 @@ using SparseArrays
 using Printf
 using LinearAlgebra
 using BundleMethod
+using Plasmo
 const BM = BundleMethod
 
 export BM

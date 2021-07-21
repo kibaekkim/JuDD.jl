@@ -1,9 +1,6 @@
-using JuMP, Ipopt, GLPK
-using DualDecomposition
-using Random
+using JuMP, Plasmo, GLPK, DualDecomposition
 
 const DD = DualDecomposition
-
 
 """
 a: interest rate
@@ -11,75 +8,23 @@ a: interest rate
 ρ: unit dividend price
 
 
-K = 3 number of stages
-L = 2 number of investment vehicles
+K: number of stages
+L: number of stock types
 2^L scenarios in each stage
 2^L^(K-1)=16 scenarios in total
 ρ = 0.05 * π
 bank: interest rate 0.01
-asset1: 1.03 or 0.97
-asset2: 1.06 or 0.94
+stock1: 1.03 or 0.97
+stock2: 1.06 or 0.94
+...
 
-"""
+b_k: initial asset (if k=1) and income (else)
+B_k: money in bank
+x_{k,l}: number of stocks to buy/sell (integer)
+y_{k,l}: total stocks 
 
-function create_tree(K::Int, L::Int)::DD.Tree
-    π = ones(L)                              
-    tree = DD.Tree(π)
-    add_nodes!(K, L, tree, 1, 1)
-    return tree
-end
+deterministic model:
 
-function add_nodes!(K::Int, L::Int, tree::DD.Tree, id::Int, k::Int)
-    if k < K-1
-        ls = iterlist(L,tree.nodes[id].ξ)
-        for π in ls
-            DD.addchild!(tree, id, π)
-            childid = length(tree.nodes)
-            add_nodes!(K, L, tree, childid, k+1)
-        end
-    elseif k == K-1
-        ls = iterlist(L,tree.nodes[id].ξ)
-        for π in ls
-            DD.addchild!(tree, id, π)
-        end
-    end
-end
-
-function iterlist(L::Int, π::Array{Float64})::Array{Array{Float64}}
-    # generates all combinations of up and down scenarios
-    ls = [Float64[] for _ in 1:2^L]
-    ii = 1
-
-    function foo(L::Int, l::Int, arr::Vector{Float64})
-        up = (1.0 + 0.03 * l) * π[l]
-        dn = (1.0 - 0.03 * l) * π[l]
-
-        if l < L
-            arr1 = copy(arr)
-            arr1[l] = up
-            foo(L, l+1, arr1)
-
-            arr2 = copy(arr)
-            arr2[l] = dn
-            foo(L, l+1, arr2)
-        else
-            arr1 = copy(arr)
-            arr1[l] = up
-            ls[ii] = arr1
-            ii+=1
-
-            arr2 = copy(arr)
-            arr2[l] = dn
-            ls[ii] = arr2
-            ii+=1
-        end
-    end
-
-    foo(L, 1, Array{Float64}(undef, L))
-    return ls
-end
-
-"""
     max     B_K+∑_{l=1}^{L}π_{K,l}y_{K,l}
 
     s.t.    B_1+∑_{l=1}^{L}π_{1,l}x_{1,l} = b_1
@@ -99,103 +44,73 @@ end
 const K = 3
 const L = 2
 const a = 0.01
-const b1 = 100  # initial capital
-const b2 = 30   # income
+const b_init = 100  # initial capital
+const b_in = 30   # income
 
-function create_scenario_model(K::Int, L::Int, tree::DD.Tree, id::Int)
-    hist = DD.get_history(tree, id)
-    m = Model(GLPK.Optimizer) 
-    #@variable(m, x[1:K,1:L], integer=true)
-    @variable(m, x[1:K,1:L])
-    @variable(m, y[1:K,1:L]>=0)
-    @variable(m, B[1:K]>=0)
+# iteratively add nodes
+# root nde
+function create_nodes!(graph::Plasmo.OptiGraph)
+    nd = DD.add_node!(graph, ones(L))
 
-    π = tree.nodes[1].ξ
+    #subproblem formulation
+    @variable(nd, x[l=1:L], Int)
+    @variable(nd, y[l=1:L] >= 0)
+    @variable(nd, B >= 0)
+    π = nd.ext[:ξ]
+    @constraints(nd, 
+        begin
+            B + sum( π[l] * x[l] for l in 1:L) == b_init
+            [l=1:L], y[l] - x[l] == 0 
+        end
+    )
+    @objective(nd, Max, nd.ext[:p] * 0)
 
-    @constraint(m, B[1] + sum( π[l] * x[1,l] for l in 1:L) == b1)
+    create_nodes!(graph, nd)
+end
+# child nodes
+function create_nodes!(graph::Plasmo.OptiGraph, pt::Plasmo.OptiNode)
+    for scenario = 1:2^L
+        prob = 1/2^L
+        ξ = get_realization(pt.ext[:ξ], scenario)
+        nd = DD.add_node!(graph, ξ, pt, prob)
 
-    for l in 1:L
-        @constraint(m, y[1,l]-x[1,l]==0)
-    end
+        #subproblem formulation
+        @variable(nd, x[l=1:L], Int)
+        @variable(nd, y[l=1:L] >= 0)
+        @variable(nd, B >= 0)
+        @variable(nd, y_[l=1:L] >= 0)
+        @variable(nd, B_ >= 0)
+        π = nd.ext[:ξ]
+        ρ = pt.ext[:ξ] * 0.05
+        @constraint(nd, B + sum( π[l] * x[l] - ρ[l] * y_[l] for l in 1:L) - (1+a) * B_ == b_in)
+        @constraint(nd, [l=1:L], y[l] - x[l] - y_[l] == 0)
 
-    for k = 2:K
-        π = tree.nodes[hist[k]].ξ
-        ρ = tree.nodes[hist[k-1]].ξ * 0.05
+        @linkconstraint(graph, [l=1:L], nd[:y_][l] == pt[:y][l])
+        @linkconstraint(graph, nd[:B_] == pt[:B])
 
-        @constraint(m, B[k] + sum( π[l] * x[k,l] - ρ[l] * y[k-1,l] for l in 1:L)
-            - (1+a) * B[k-1] == b2)
-        for l in 1:L
-            @constraint(m, y[k,l]-x[k,l]-y[k-1,l]==0)
+        if nd.ext[:stage] < K
+            @objective(nd, Max, nd.ext[:p] * 0)
+            create_nodes!(graph, nd)
+        else
+            @constraint(nd, [l=1:L], x[l] == 0)
+            @objective(nd, Max, nd.ext[:p] * (B + sum( π[l] * y[l] for l in 1:L )))
         end
     end
-    for l in 1:L
-        @constraint(m, x[K,l]==0)
-    end
-    π = tree.nodes[id].ξ
-    @objective(m, Min, - (B[K] + sum( π[l] * y[K,l] for l in 1:L ))/(2^L)^(K-1) )
-    return m
 end
 
-"""
-
-The main computation section
-
-"""
-function main_comp()
-    # generate tree data structure
-    tree = create_tree(K,L)
-
-    # Create DualDecomposition instance.
-    algo = DD.LagrangeDual()
-        
-    # Lagrange master method
-    LM = DD.BundleMaster(BM.TrustRegionMethod, GLPK.Optimizer)
-
-    # compute dual decomposition method
-    dual_decomp!(L, tree, algo, LM)
+# construct realization event
+function get_realization(ξ::Array{Float64,1}, scenario::Int)::Array{Float64,1}
+    ret = ones(L)
+    multipliers = digits(scenario - 1, base=2, pad=L)*2 - ones(L)
+    for l = 1:L
+        ret[l] = ξ[l] * (1 + multipliers[l] * l * 0.03)
+    end
+    return ret
 end
 
-
-function dual_decomp!(L::Int, tree::DD.Tree, algo::DD.LagrangeDual, LM::DD.AbstractLagrangeMaster)
-
-    # Add Lagrange dual problem for each scenario s.
-    nodelist = DD.get_stage_id(tree)
-    leafdict = DD.leaf2block(nodelist[K])
-    models = Dict{Int,JuMP.Model}(id => create_scenario_model(K,L,tree,id) for id in nodelist[K])
-    for id in nodelist[K]
-        DD.add_block_model!(algo, leafdict[id], models[id])
-    end
-
-    coupling_variables = Vector{DD.CouplingVariableRef}()
-    for k in 1:K-1
-        for root in nodelist[k]
-            leaves = DD.get_future(tree, root)
-            for id in leaves
-                model = models[id]
-                yref = model[:y]
-                for l in 1:L
-                    push!(coupling_variables, DD.CouplingVariableRef(leafdict[id], [root, l], yref[k, l]))
-                end
-                Bref = model[:B]
-                push!(coupling_variables, DD.CouplingVariableRef(leafdict[id], [root, L+1], Bref[k]))
-            end
-        end
-    end
-    # dummy coupling variables
-    for id in nodelist[K]
-        model = models[id]
-        yref = model[:y]
-        for l in 1:L
-            push!(coupling_variables, DD.CouplingVariableRef(leafdict[id], [id, l], yref[K, l]))
-        end
-        Bref = model[:B]
-        push!(coupling_variables, DD.CouplingVariableRef(leafdict[id], [id, L+1], Bref[K]))
-    end
-
-    # Set nonanticipativity variables as an array of symbols.
-    DD.set_coupling_variables!(algo, coupling_variables)
-
-    # Solve the problem with the solver; this solver is for the underlying bundle method.
-    DD.run!(algo, LM)
-end
-
+# create graph
+graph = Plasmo.OptiGraph()
+create_nodes!(graph)
+set_optimizer(graph,GLPK.Optimizer)
+optimize!(graph)
+println(objective_value(graph))
